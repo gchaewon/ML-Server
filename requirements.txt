@@ -1,0 +1,12 @@
+Flask
+Flask-RESTful
+flask-cors
+pydub
+SpeechRecognition
+librosa
+requests
+ffmpeg
+google-cloud-texttospeech
+opencv-python
+pillow
+boto3
