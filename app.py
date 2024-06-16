@@ -20,7 +20,7 @@ if __name__ == '__main__':
     app = create_app()
     
     # CORS 설정
-    CORS(app, resources={r"/*": {"origins": "https://iterview.vercel.app"}}, supports_credentials=True)
+    CORS(app, resources={r"/*": {"origins": "https://iterview.vercel.app" }}, supports_credentials=True)
     # 애플리케이션 실행
     # app.run()
-    app.run('0.0.0.0', port=5000, debug=True)
+    app.run('0.0.0.0', port=5001, debug=True)
