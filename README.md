@@ -14,9 +14,13 @@
 | **`git clone https://github.com/TEAM-ITERVIEW/ML_SERVER.git`** <br/> **`python3 -m venv venv`** <br/> **`source venv/bin/activate`** <br/> **`pip3 install -r requirements.txt`** | **`python3 app.py`** |
 
 ### 🛠️ ML SERVER Test
-| 테스트 코드 |
-| :--- |
-| **`python3 ./test/test_stt.py`** <br/> **`python3 ./test/test_fer.py`**|
+| 기능 | 테스트 코드 | 
+| :--- | :---: |
+| **주의 사항** | 위 start 코드로 서버를 실행 시키고, 다른 터미널을 열어 테스트 진행 <br/> tts test는 google cloud API key 등록 후 가능 |
+| stt 및 음성분석 API |**`python3 ./test/test_stt.py`**|
+| 표정 분석 API | **`python3 ./test/test_fer.py`**|
+| tts API | **`python3 ./test/test_tts.py`**|
+
 <br/>
 
 ![1](https://github.com/TEAM-ITERVIEW/.github/assets/102040717/a1b8b991-2f5c-4bfd-968c-2fbc38f65a9d)
