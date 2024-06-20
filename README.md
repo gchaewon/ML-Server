@@ -13,6 +13,22 @@
 | :--- | :---: |
 | **`git clone https://github.com/TEAM-ITERVIEW/ML_SERVER.git`** <br/> **`python3 -m venv venv`** <br/> **`source venv/bin/activate`** <br/> **`pip3 install -r requirements.txt`** | **`python3 app.py`** |
 
+| ML SERVEr Folder Structure | 
+| :--- |
+|<table>
+    ML_SERVER
+    ├─ 📂 app       
+      ├─ fer.py     ▶️ 표정 분석 API
+      ├─ stt.py     ▶️ 음성 분석 및 stt API
+      └─ tts.py     ▶️ tts API
+    ├─ 📂 models    ▶️ 표정 분석 및 음성 분석에 필요한 모델
+    ├─ 📂 test      ▶️ test용 코드 및 파일
+    ├─ .gitignore  
+    ├─ app.py       ▶️ flask main app
+    ├─ requirements.txt   ▶️ 다운로드가 필요한 모듈 및 라이브러리 목록
+    └─ README.md 
+</table>
+
 ### 🛠️ ML SERVER Test
 | 기능 | 테스트 코드 | 
 | :--- | :---: |
