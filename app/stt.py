@@ -17,8 +17,8 @@ import datetime
 stt_app = Blueprint('stt', __name__)
 
 # 모델 임포트
-filler_classifier_model = tf.keras.models.load_model('./models/binary_model.h5')
-filler_determine_model = tf.keras.models.load_model('./models/multi_model.h5')
+filler_classifier_interpreter = tf.lite.Interpreter(model_path='./models/binary_model.tflite')
+filler_classifier_interpreter.allocate_tensors()
 
 # 전역 변수 선언
 pad1d = lambda a, i: a[0: i] if a.shape[0] > i else np.hstack((a, np.zeros(i-a.shape[0])))
@@ -26,6 +26,7 @@ pad2d = lambda a, i: a[:, 0:i] if a.shape[1] > i else np.hstack((a, np.zeros((a.
 
 frame_length = 0.025
 frame_stride = 0.0010
+
 
 # webm 을 wav로 변환하는 함수
 def convert_webm_to_wav(webm_content):
@@ -39,23 +40,37 @@ def match_target_amplitude(sound, target_dBFS):
     normalized_sound = sound.apply_gain(target_dBFS - sound.dBFS)
     return normalized_sound
 
+# tflite 모델 예측 함수
+def predict_tflite(interpreter, input_data):
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+    
+    # 입력 데이터 설정
+    interpreter.set_tensor(input_details[0]['index'], input_data.astype(np.float32))
+
+    # 추론 실행
+    interpreter.invoke()
+
+    # 출력 가져오기
+    output_data = interpreter.get_tensor(output_details[0]['index'])
+    return output_data
+
 # 비언어적 표현 이진 분류
 def predict_filler(audio_file):
-    # 구간 분류를 위한 임시 저장
     audio_file.export("temp.wav", format="wav")
 
     wav, sr = librosa.load("temp.wav", sr=16000)
 
     mfcc = librosa.feature.mfcc(y=wav)
-    padded_mfcc = pad2d(mfcc, 40)
-    padded_mfcc = np.expand_dims(padded_mfcc, 0)
+    padded_mfcc = pad2d(mfcc, 40)  
+    padded_mfcc = np.expand_dims(padded_mfcc, 0) 
+    padded_mfcc = np.expand_dims(padded_mfcc, -1) 
 
-    result = filler_classifier_model.predict(padded_mfcc)
+    result = predict_tflite(filler_classifier_interpreter, padded_mfcc)
 
-    # 임시 파일 삭제
     os.remove("temp.wav")
 
-    label = int(np.argmax(result))  # 0: filler, 1: not filler
+    label = int(np.argmax(result))
     return label
 
 # 구간 더 짧게 나누는 함수
