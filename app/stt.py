@@ -3,10 +3,7 @@ from flask import Flask, jsonify, request
 from flask import Blueprint
 from flask_cors import CORS
 from pydub import AudioSegment
-from pydub.silence import detect_silence
 from pydub.silence import detect_nonsilent
-from keras.models import load_model
-# from google.cloud import speech_v1p1beta1 as speech
 
 import numpy as np
 import os
@@ -20,8 +17,8 @@ import datetime
 stt_app = Blueprint('stt', __name__)
 
 # 모델 임포트
-filler_classifier_model = tf.keras.models.load_model('./models/filter_classifier_model.h5')
-filter_determine_model = tf.keras.models.load_model('./models/filter_determine_model.h5')
+filler_classifier_model = tf.keras.models.load_model('./models/binary_model.h5')
+filler_determine_model = tf.keras.models.load_model('./models/multi_model.h5')
 
 # 전역 변수 선언
 pad1d = lambda a, i: a[0: i] if a.shape[0] > i else np.hstack((a, np.zeros(i-a.shape[0])))
@@ -42,209 +39,167 @@ def match_target_amplitude(sound, target_dBFS):
     normalized_sound = sound.apply_gain(target_dBFS - sound.dBFS)
     return normalized_sound
 
-# 오디오 추임새를 예측 함수 
+# 비언어적 표현 이진 분류
 def predict_filler(audio_file):
-  audio_file.export("temp.wav", format="wav")
-  wav, sr = librosa.load("temp.wav", sr=16000)
-  mfcc = librosa.feature.mfcc(y=wav)
-  padded_mfcc = pad2d(mfcc, 40)
-  padded_mfcc = np.expand_dims(padded_mfcc, 0)
+    # 구간 분류를 위한 임시 저장
+    audio_file.export("temp.wav", format="wav")
 
-  result = filler_classifier_model.predict(padded_mfcc)
-  if result[0][0] >= result[0][1]: 
-    return 0
-  else:
-    return 1
+    wav, sr = librosa.load("temp.wav", sr=16000)
 
+    mfcc = librosa.feature.mfcc(y=wav)
+    padded_mfcc = pad2d(mfcc, 40)
+    padded_mfcc = np.expand_dims(padded_mfcc, 0)
 
-# 추임새 종류 판별 함수
-def predict_filler_type(audio_file):
-  audio_file.export("temp.wav", format="wav")
+    result = filler_classifier_model.predict(padded_mfcc)
 
-  wav, sr = librosa.load("temp.wav", sr=16000)
-  input_nfft = int(round(sr*frame_length))
-  input_stride = int(round(sr*frame_stride))
+    # 임시 파일 삭제
+    os.remove("temp.wav")
 
-  mfcc = librosa.feature.mfcc(y=wav)
-  padded_mfcc = pad2d(mfcc, 40)
-  padded_mfcc = np.expand_dims(padded_mfcc, 0)
-  result = filler_classifier_model.predict(padded_mfcc)
+    label = int(np.argmax(result))  # 0: filler, 1: not filler
+    return label
 
-  os.remove("temp.wav")
-  return np.argmax(result)
-
-# 추임새를 더 작은 단위로 나누는 함수
+# 구간 더 짧게 나누는 함수
 def shorter_filler(json_result, audio_file, min_silence_len, start_time, non_silence_start):
-  min_silence_length = (int)(min_silence_len/1.2)
+    min_silence_length = (int)(min_silence_len/1.2)
 
-  intervals = detect_nonsilent(audio_file,
+    # 소리나는 구간 탐지 
+    intervals = detect_nonsilent(audio_file,
                               min_silence_len=min_silence_length,
                               silence_thresh=-32.64
                               )
-  for interval in intervals:
-    interval_audio = audio_file[interval[0]:interval[1]]
-    # padding 40 길이 이상인 경우 더 짧게
-    if (interval[1]-interval[0] >= 460):
-      non_silence_start = shorter_filler(json_result, interval_audio, min_silence_length, interval[0]+start_time, non_silence_start)
-    else: # padding 40 길이보다 짧은 경우 predict
-      if predict_filler(interval_audio) == 0 : # 추임새인 경우
-        json_result.append({'start':non_silence_start,'end':start_time+interval[0],'tag':'1000'}) # tag: 1000 means non-slience
-        non_silence_start = start_time + interval[0]
-        # 추임새 tagging
-        json_result.append({'start':start_time+interval[0],'end':start_time+interval[1],'tag':'1111'}) # tag: 1111 means filler word
 
-  return non_silence_start
+    for interval in intervals:
+        interval_audio = audio_file[interval[0]:interval[1]]
+
+        # 460ms 이상인 경우, 구간 다시 더 잘게 쪼갬
+        if (interval[1]-interval[0] >= 460):
+            non_silence_start = shorter_filler(json_result, interval_audio, min_silence_length, interval[0]+start_time, non_silence_start)
+
+        else: # 구간 길이가 짧은 경우 predict
+            if predict_filler(interval_audio) == 0 : # 추임새인 경우
+                 # 추임새 바로 앞 구간은 일반 음성으로 태깅 (1000)
+                json_result.append({'start':non_silence_start,'end':start_time+interval[0],'tag':'1000'})
+                non_silence_start = start_time + interval[0]
+                 # 추임새 구간은 별도로 태깅 (1001)
+                json_result.append({'start':start_time+interval[0],'end':start_time+interval[1],'tag':'1001'})
+    return non_silence_start
 
 # 오디오에서 추임새와 침묵 구간을 탐지하고 JSON 형식으로 반환
 def create_json(audio_file):
-  intervals_jsons = []
-  min_silence_length = 70
-  intervals = detect_nonsilent(audio_file,
-                              min_silence_len=min_silence_length,
-                              silence_thresh=-32.64
-                              )
-  if not intervals:
-    return intervals_jsons
-    
-  if intervals[0][0] != 0:
-    intervals_jsons.append({'start':0,'end':intervals[0][0],'tag':'0000'}) # tag: 0000 means silence
-  non_silence_start = intervals[0][0]
-  before_silence_start = intervals[0][1]
+    jsons = []
+    min_silence_length = 70
 
-  for interval in intervals:
-    interval_audio = audio_file[interval[0]:interval[1]]
+    # 소리 나는 구간 감지
+    intervals = detect_nonsilent(audio_file, min_silence_len=min_silence_length, silence_thresh=-32.64)
 
-     # 800ms초 이상의 공백 부분 처리
-    if (interval[0]-before_silence_start) >= 800:
-      intervals_jsons.append({'start':non_silence_start,'end':before_silence_start+200,'tag':'1000'}) # tag: 1000 means non-slience
-      non_silence_start = interval[0]-200
-      intervals_jsons.append({'start':before_silence_start,'end':interval[0],'tag':'0000'}) # tag: 0000 means slience
+    # 맨 앞이 침묵이면 먼저 태깅
+    if intervals[0][0] != 0:
+        jsons.append({'start': 0, 'end': intervals[0][0], 'tag': '0000'})
 
-    if predict_filler(interval_audio) == 0 : # 추임새인 경우
-      if len(interval_audio) <= 460:
-        intervals_jsons.append({'start':non_silence_start,'end':interval[0],'tag':'1000'}) # tag: 1000 means non-slience
-        non_silence_start = interval[0]
-        intervals_jsons.append({'start':interval[0],'end':interval[1],'tag':'1111'})
-      else:
-        non_silence_start = shorter_filler(intervals_jsons, interval_audio, min_silence_length, interval[0], non_silence_start)
-    before_silence_start = interval[1]
+    non_silence_start = intervals[0][0]
+    before_silence_end = intervals[0][1]
 
-  if non_silence_start != len(audio_file):
-    intervals_jsons.append({'start':non_silence_start,'end':len(audio_file),'tag':'1000'})
+    for interval in intervals:
+        segment = audio_file[interval[0]:interval[1]]
 
-  return intervals_jsons
+         # 이전 구간과 간격이 800ms 이상일 때 침묵이 있다고 판단
+        if (interval[0] - before_silence_end) >= 800:
+            # 이전 소리 구간 마무리 태깅 (1000), 침묵 구간 태깅 (0000)
+            jsons.append({'start': non_silence_start, 'end': before_silence_end+200, 'tag': '1000'})
+            jsons.append({'start': before_silence_end, 'end': interval[0], 'tag': '0000'})
+            # 다음 비침묵 시작점 조정
+            non_silence_start = interval[0]-200
+
+        # 현재 구간이 추임새인지 판별
+        if predict_filler(segment) == 0:
+            # 구간이 짧은 경우, 바로 태깅
+            if len(segment) <= 460:
+                jsons.append({'start': non_silence_start, 'end': interval[0], 'tag': '1000'})
+                jsons.append({'start': interval[0], 'end': interval[1], 'tag': '1001'})
+                non_silence_start = interval[1]
+            # 구간이 긴 경우 다시 쪼개서 처리
+            else:
+                non_silence_start = shorter_filler(jsons, segment, min_silence_length, interval[0], non_silence_start)
+        
+        before_silence_end = interval[1]
+
+    # 남은 구간 처리
+    if non_silence_start != len(audio_file):
+        jsons.append({'start': non_silence_start, 'end': len(audio_file), 'tag': '1000'})
+    return jsons
 
 # 오디오 파일에서 추출된 JSON을 기반으로 음성 인식 및 텍스트 변환
 def STT_with_json(audio_file, jsons):
-  first_silence = 0
-  num = 0
-  unrecognizable_start = 0
-  r = sr.Recognizer()
-  transcript_json = []
-  statistics_filler_json = []
-  statistics_silence_json = []
-  filler_1 = 0
-  filler_2 = 0
-  filler_3 = 0
-  audio_total_length = audio_file.duration_seconds
-  silence_interval = 0
-  for json in jsons :
-    if json['tag'] == '0000':
-      # 발화 지연시간
-      if num == 0:
-        first_silence = first_silence + (json['end']-json['start'])/1000
-      else:
-        silence_interval = silence_interval + (json['end']-json['start'])/1000
-        silence = "(" + str(round((json['end']-json['start'])/1000)) + "초).."
-        transcript_json.append({'start':json['start'],'end':json['end'],'tag':'0000','result':silence})
+    r = sr.Recognizer()
+    transcript_json = []  # 최종 결과 저장 리스트
 
-    elif json['tag'] == '1111':
-      # 발화 지연시간
-      if num == 0:
-        silence = "(" + str(round(first_silence)) + "초).."
-        transcript_json.append({'start':0,'end':json['start'],'tag':'0000','result':silence})
-        first_silence_interval = first_silence
-      # 추임새(어, 음, 그) 구분
-      filler_type = predict_filler_type(audio_file[json['start']:json['end']])
-      if filler_type == 0 :
-        transcript_json.append({'start':json['start'],'end':json['end'],'tag':'1001','result':'어(추임새)'})
-        filler_1 = filler_1 + 1
-      elif filler_type == 1:
-        transcript_json.append({'start':json['start'],'end':json['end'],'tag':'1010','result':'음(추임새)'})
-        filler_2 = filler_2 + 1
-      else:
-        transcript_json.append({'start':json['start'],'end':json['end'],'tag':'1100','result':'그(추임새)'})
-        filler_3 = filler_3 + 1
-      num = num + 1
+    silent = 0  
+    mumble = 0 # 비언어적 표현
+    talk = 0 # 발화 표현
 
-    elif json['tag'] == '1000':
-      # 인식불가 처리
-      if unrecognizable_start != 0:
-        audio_file[unrecognizable_start:json['end']].export("temp.wav", format="wav")
-      else:
-        audio_file[json['start']:json['end']].export("temp.wav", format="wav")
-      temp_audio_file = sr.AudioFile('temp.wav')
-      with temp_audio_file as source:
-        audio = r.record(source)
-      try :
-        stt = r.recognize_google(audio_data = audio, language = "ko-KR")
+    audio_total_length = audio_file.duration_seconds # 전체 오디오 길이
 
-        # google cloud tts test code ======================================
-        # config = {
-        #     "language_code": "ko-KR",
-        # }
-        # response = client.recognize(config=config, audio=audio)
-        # stt = response.results[0].alternatives[0].transcript
-        # =================================================================
-        first_silence_interval = 0
-        # 발화 지연시간
-        if num == 0:
-          silence = "(" + str(round(first_silence)) + "초).."
-          transcript_json.append({'start':0,'end':json['start'],'tag':'0000','result':silence})
-          first_silence_interval = first_silence
-        if unrecognizable_start != 0:
-          transcript_json.append({'start':unrecognizable_start,'end':json['end'],'tag':'1000','result':stt})
-        else:
-          transcript_json.append({'start':json['start'],'end':json['end'],'tag':'1000','result':stt})
-        unrecognizable_start = 0
-        num = num + 1
-      except:
-        if unrecognizable_start == 0:
-          unrecognizable_start = json['start']
+    for json in jsons:
+        duration_sec = (json['end'] - json['start']) / 1000
 
-  statistics_filler_json.append({'어':filler_1, '음':filler_2, '그':filler_3})
-  statistics_silence_json.append({'mumble': round(100 * first_silence_interval/audio_total_length), 
-                                  'silent': round(100 * silence_interval/audio_total_length), 
-                                  'talk': round(100 * (audio_total_length - first_silence - silence_interval)/audio_total_length), 
-                                  'time': round(audio_total_length)})
-  
-  transcript = [item['result'] for item in transcript_json]
-  filtered_transcript = [value for value in transcript if ('(추임새)' not in value) and ('..' not in value)]
+        # 침묵 구간
+        if json['tag'] == '0000':
+            silent += duration_sec
+        
+        # 비언어적 표현 (추임새) 구간
+        elif json['tag'] == '1001':
+            mumble += duration_sec
 
-  filtered_transcript = ' '.join(filtered_transcript)
-  return filtered_transcript, statistics_silence_json
+        # 일반 발화 구간 
+        elif json['tag'] == '1000':
+            talk += duration_sec
+            audio_file[json['start']:json['end']].export("temp.wav", format="wav")
 
+            with sr.AudioFile('temp.wav') as source:
+                audio = r.record(source)
+                try:
+                    # 발화 구간일 때 stt 후 추가하기
+                    stt = r.recognize_google(audio, language='ko-KR')
+                    transcript_json.append({'start': json['start'], 'end': json['end'], 'tag': '1000', 'result': stt})
+                except:
+                    pass # stt 실패시 제외 
+
+    os.remove("temp.wav")
+
+    # 전체 발화 텍스트만 추출 (추임새, 침묵 제거)
+    transcript = [item['result'] for item in transcript_json]
+    transcript = ' '.join(transcript)
+
+    # 음성 분석 통계 
+    statistics = [{
+         'mumble': round(100 * mumble / audio_total_length), # 말 더듬은 비율
+        'silent': round(100 * silent / audio_total_length), # 침묵 비율 
+        'talk': round(100 * talk / audio_total_length), # 발화 비율
+        'time': round(audio_total_length) # 전체 발화 시간
+    }]
+    return transcript, statistics
 
 # 음성 파일 STT, 비언어적 표현 분석 함수
 def get_prediction(audio_content):
     wav_file = convert_webm_to_wav(audio_content)
     audio = AudioSegment.from_wav(io.BytesIO(wav_file))
-    intervals_jsons = create_json(audio)
+    normalized_audio = match_target_amplitude(audio, -20.0)
+    intervals_jsons = create_json(normalized_audio)
     transcript, statistics = STT_with_json(audio, intervals_jsons)
     return transcript, statistics
 
 @stt_app.route('/model/stt', methods=['POST'])
 def stt():
     if request.method == 'POST':
-        # start_time = datetime.datetime.now() # 응답 소요 시간 기록
+        start_time = datetime.datetime.now() # 응답 소요 시간 기록
 
         file = request.files['file']
         webm_file = file.read()
         pk = request.form.get('pk')  
         transcript, statistics = get_prediction(webm_file)
 
-        # end_time = datetime.datetime.now()  # 응답을 보내는 시간 기록
-        # total_time = (end_time - start_time).total_seconds()  # 전체 걸린 시간 계산
+        end_time = datetime.datetime.now()  # 응답을 보내는 시간 기록
+        total_time =  round((end_time - start_time).total_seconds())  # 전체 걸린 시간 계산
 
         response_data = {
             "interviewQuestionId": pk, 
@@ -252,7 +207,7 @@ def stt():
             "silent": statistics[0]['silent'],
             "talk": statistics[0]['talk'],
             "time": statistics[0]['time'],
-            "text": transcript
+            "text": transcript,
+            "responseTime": total_time
         }
         return jsonify(response_data)
-
